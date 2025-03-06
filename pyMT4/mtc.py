@@ -249,7 +249,8 @@ class MTC(object):
                 self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
                 np_rot_matrix = np.frombuffer(
                     rot_matrix, dtype=np.float64).reshape((3, 3))
-                marker_data['rot'] = np.copy(np_rot_matrix)
+                # Transpose the rotation matrix to match the marker's orientation
+                marker_data['rot'] = np.copy(np_rot_matrix.T)
 
             # Store the retrieved data in the markers dict
             markers[marker_name] = marker_data
