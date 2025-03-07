@@ -1,6 +1,7 @@
 import os
 import warnings
 import ctypes
+import logging
 import numpy as np
 from ctypes import *
 from typing import Tuple
@@ -28,9 +29,7 @@ class MTC(object):
             lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
             self.mtc_lib = ctypes.CDLL(lib_path)
         except OSError as e:
-            warnings.warn(
-                f"Could not load MTC library from {lib_path}: {e}", RuntimeWarning)
-            return
+            raise RuntimeError(f"Could not load MTC library from {lib_path}: {e}")
 
         # Set types for MTLastErrorString
         self.mtc_lib.MTLastErrorString.restype = c_char_p
@@ -265,8 +264,7 @@ class MTC(object):
             function_name (str): The name of the function where the error occurred.
         """
         error_message = self.mtc_lib.MTLastErrorString().decode('utf-8')
-        warnings.warn(
-            f"Error in {function_name}: {error_message}", RuntimeWarning)
+        raise RuntimeError(f"Error in {function_name}: {error_message}")
 
     def _attach_cameras(self) -> None:
         """
@@ -285,7 +283,7 @@ class MTC(object):
         if result != 0:
             self._process_error("Cameras_AttachAvailableCameras")
         else:
-            print("Successfully attached available cameras.")
+            logging.info("Successfully attached available cameras.")
 
     def _load_marker_templates(self) -> None:
         """
@@ -303,7 +301,7 @@ class MTC(object):
         if result != 0:
             self._process_error("Markers_LoadTemplates")
         else:
-            print("Successfully loaded marker templates.")
+            logging.info("Successfully loaded marker templates.")
 
     def _create_collection(self) -> int:
         """
