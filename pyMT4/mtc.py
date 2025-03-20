@@ -1,4 +1,5 @@
 import os
+import sys
 import warnings
 import ctypes
 import logging
@@ -26,8 +27,12 @@ class MTC(object):
 
         # Load the shared library
         try:
-            lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
-            self.mtc_lib = ctypes.CDLL(lib_path)
+            if sys.platform == "win32":
+                lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
+                self.mtc_lib = ctypes.CDLL(lib_path)
+            elif sys.platform == "linux":
+                lib_path = os.path.join(self.mthome, 'Dist64MT4', 'libMTC.so')
+                self.mtc_lib = ctypes.CDLL(lib_path)
         except OSError as e:
             raise RuntimeError(f"Could not load MTC library from {lib_path}: {e}")
 
@@ -49,10 +54,10 @@ class MTC(object):
             self.serial_number = self.get_serial_number(self._camera)
 
             # Set streaming mode
-            self.set_streaming_mode(self.serial_number,
-                                    mtFrameType.Alternating,
-                                    mtDecimation.Dec41,
-                                    mtBitDepth.Bpp14)
+            # self.set_streaming_mode(self.serial_number,
+            #                         mtFrameType.Alternating,
+            #                         mtDecimation.Dec41,
+            #                         mtBitDepth.Bpp14)
 
             # Init collection handles
             self._markers = self._create_collection()
