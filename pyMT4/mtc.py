@@ -1,6 +1,7 @@
 import os
 import warnings
 import ctypes
+import logging
 import numpy as np
 from ctypes import *
 from typing import Tuple
@@ -28,9 +29,7 @@ class MTC(object):
             lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
             self.mtc_lib = ctypes.CDLL(lib_path)
         except OSError as e:
-            warnings.warn(
-                f"Could not load MTC library from {lib_path}: {e}", RuntimeWarning)
-            return
+            raise RuntimeError(f"Could not load MTC library from {lib_path}: {e}")
 
         # Set types for MTLastErrorString
         self.mtc_lib.MTLastErrorString.restype = c_char_p
@@ -249,7 +248,8 @@ class MTC(object):
                 self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
                 np_rot_matrix = np.frombuffer(
                     rot_matrix, dtype=np.float64).reshape((3, 3))
-                marker_data['rot'] = np.copy(np_rot_matrix)
+                # Transpose the rotation matrix to match the marker's orientation
+                marker_data['rot'] = np.copy(np_rot_matrix.T)
 
             # Store the retrieved data in the markers dict
             markers[marker_name] = marker_data
@@ -264,8 +264,7 @@ class MTC(object):
             function_name (str): The name of the function where the error occurred.
         """
         error_message = self.mtc_lib.MTLastErrorString().decode('utf-8')
-        warnings.warn(
-            f"Error in {function_name}: {error_message}", RuntimeWarning)
+        raise RuntimeError(f"Error in {function_name}: {error_message}")
 
     def _attach_cameras(self) -> None:
         """
@@ -284,7 +283,7 @@ class MTC(object):
         if result != 0:
             self._process_error("Cameras_AttachAvailableCameras")
         else:
-            print("Successfully attached available cameras.")
+            logging.info("Successfully attached available cameras.")
 
     def _load_marker_templates(self) -> None:
         """
@@ -302,7 +301,7 @@ class MTC(object):
         if result != 0:
             self._process_error("Markers_LoadTemplates")
         else:
-            print("Successfully loaded marker templates.")
+            logging.info("Successfully loaded marker templates.")
 
     def _create_collection(self) -> int:
         """
