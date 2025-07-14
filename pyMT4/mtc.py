@@ -202,54 +202,25 @@ class MTC(object):
         # Dictionary to hold marker data
         markers = {}
 
-        # Define the argument and return types for the functions used
-        self.mtc_lib.Collection_Int.argtypes = [c_longlong, c_int]
-        self.mtc_lib.Collection_Int.restype = c_longlong
-
-        self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
-            c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
-        self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
-
-        self.mtc_lib.Xform3D_ShiftGet.argtypes = [
-            c_longlong, POINTER(c_double * 3)]
-        self.mtc_lib.Xform3D_ShiftGet.restype = c_int
-
-        # Define the argument and return types for rotation matrix if requested
-        if rot:
-            self.mtc_lib.Xform3D_RotMatGet.argtypes = [
-                c_longlong, POINTER(c_double * 9)]
-            self.mtc_lib.Xform3D_RotMatGet.restype = c_int
-
         # Get the number of markers identified in the current frame
-        num_markers = self._get_frame_markers()
+        num_markers = self._get_markers()
 
         # Loop over each marker to retrieve its pose
         for i in range(num_markers):
             # Get the handle of the current marker from the collection
-            marker = self.mtc_lib.Collection_Int(self._markers, i + 1)
-
-            # Retrieve the pose of the marker
-            camera_xf = c_longlong()
-            self.mtc_lib.Marker_Marker2CameraXfGet(
-                marker, self._camera, self._poseXf, byref(camera_xf))
+            marker = self._get_marker(i)
 
             # Get the name of the marker
             marker_name = self._get_marker_name(marker)
 
             # Retrieve the position of the marker
-            positions = (c_double * 3)()
-            self.mtc_lib.Xform3D_ShiftGet(self._poseXf, byref(positions))
-            np_positions = np.frombuffer(positions, dtype=np.float64)
+            positions = self._get_position()
+            marker_data = {'pos': positions}
 
             # Optionally retrieve the rotation matrix of the marker
-            marker_data = {'pos': np.copy(np_positions)}
             if rot:
-                rot_matrix = (c_double * 9)()
-                self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
-                np_rot_matrix = np.frombuffer(
-                    rot_matrix, dtype=np.float64).reshape((3, 3))
-                # Transpose the rotation matrix to match the marker's orientation
-                marker_data['rot'] = np.copy(np_rot_matrix.T)
+                rotations = self._get_rotation()
+                marker_data['rot'] = rotations
 
             # Store the retrieved data in the markers dict
             markers[marker_name] = marker_data
@@ -350,7 +321,7 @@ class MTC(object):
                 self._process_error("Xform3D_New")
         return None
 
-    def _get_frame_markers(self) -> int:
+    def _get_markers(self) -> int:
         """
         Grabs a frame from the camera, processes it to identify markers,
         and returns the number of markers identified.
@@ -425,3 +396,69 @@ class MTC(object):
             else:
                 self._process_error("Marker_NameGet")
         return None
+    
+    def _get_marker(self,
+                    index: int) -> int:
+        """"
+        Retrieves the marker handle for a specified index and updates the poseXf with the marker's pose.
+
+        Parameters:
+            index (int): The index of the marker.
+        """
+        # Define the argument and return types for the functions used
+        self.mtc_lib.Collection_Int.argtypes = [c_longlong, c_int]
+        self.mtc_lib.Collection_Int.restype = c_longlong
+
+        self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
+            c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+        self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
+
+        # Get the handle of the current marker from the collection
+        marker = self.mtc_lib.Collection_Int(self._markers, index + 1)
+
+        # Update the poseXf with the marker's pose
+        camera_identifier = c_longlong()
+        self.mtc_lib.Marker_Marker2CameraXfGet(
+            marker, self._camera, self._poseXf, byref(camera_identifier))
+
+        return marker
+
+    def _get_position(self) -> np.ndarray:
+        """
+        Retrieves the position of the marker from the poseXf and returns it as a NumPy array.
+
+        Returns:
+            np.ndarray: A NumPy array containing the position of the marker (x, y, z).
+        """
+        # Define the argument and return types for the functions used
+        self.mtc_lib.Xform3D_ShiftGet.argtypes = [
+            c_longlong, POINTER(c_double * 3)]
+        self.mtc_lib.Xform3D_ShiftGet.restype = c_int
+
+        # Retrieve the position of the marker
+        positions = (c_double * 3)()
+        self.mtc_lib.Xform3D_ShiftGet(self._poseXf, byref(positions))
+        np_positions = np.frombuffer(positions, dtype=np.float64)
+
+        return np.copy(np_positions)
+
+    def _get_rotation(self) -> np.ndarray:
+        """
+        Retrieves the rotation matrix of the marker from the poseXf and returns it as a NumPy array.
+
+        Returns:
+            np.ndarray: A NumPy array containing the rotation matrix of the marker (3x3).
+        """
+        # Define the argument and return types for the functions used
+        self.mtc_lib.Xform3D_RotMatGet.argtypes = [
+            c_longlong, POINTER(c_double * 9)]
+        self.mtc_lib.Xform3D_RotMatGet.restype = c_int
+
+        # Retrieve the rotation matrix of the marker
+        rot_matrix = (c_double * 9)()
+        self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
+        np_rot_matrix = np.frombuffer(
+            rot_matrix, dtype=np.float64).reshape((3, 3))
+
+        # Transpose the rotation matrix to match the generally expected orientation
+        return np.copy(np_rot_matrix.T)
