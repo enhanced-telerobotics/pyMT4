@@ -256,6 +256,15 @@ class MTC(object):
 
         return markers
 
+    def close(self) -> None:
+        """
+        Detaches all cameras and releases resources.
+        """
+        if self.mtc_lib:
+            self.mtc_lib.Cameras_Detach.argtypes = []
+            self.mtc_lib.Cameras_Detach.restype = None
+            self.mtc_lib.Cameras_Detach()
+
     def _process_error(self, function_name: str) -> None:
         """
         Processes and logs an error message for the specified function.
