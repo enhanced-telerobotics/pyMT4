@@ -12,6 +12,31 @@ MT_MAX_STRING_LENGTH = 400
 
 
 class MTC(object):
+    """
+    MTC provides a Python interface to the MT4 camera tracking system via its shared library.
+        This class handles loading the MT4 DLL, attaching cameras, loading marker templates, and provides
+        methods for camera and marker management, including retrieving camera information, setting streaming
+        modes, processing frames, and extracting marker poses.
+        
+    Class Variables:
+        mtc_lib (ctypes.CDLL): The loaded MT4 shared library.
+        mthome (str): Path to the MT4 home directory.
+        _camera (int): Handle to the currently selected camera.
+        _serial_number (int): Serial number of the selected camera.
+        _markers (int): Handle to the collection of detected markers.
+        _poseXf (int): Handle to the 3D transformation object for marker pose.
+        _ref_marker (int): Handle to the reference marker (if set).
+    """
+    mtc_lib: ctypes.CDLL
+    mthome: str
+
+    _camera: int
+    _serial_number: int
+
+    _markers: int
+    _poseXf: int
+    _ref_marker: int
+
     def __init__(self,
                  mt_home: str = MTHome,
                  cam_index: int = 0) -> None:
@@ -29,7 +54,8 @@ class MTC(object):
             lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
             self.mtc_lib = ctypes.CDLL(lib_path)
         except OSError as e:
-            raise RuntimeError(f"Could not load MTC library from {lib_path}: {e}")
+            raise RuntimeError(
+                f"Could not load MTC library from {lib_path}: {e}")
 
         # Set types for MTLastErrorString
         self.mtc_lib.MTLastErrorString.restype = c_char_p
@@ -42,15 +68,17 @@ class MTC(object):
         camera_count = self.get_camera_count()
 
         if camera_count:
+            assert cam_index < camera_count, \
+                f"Camera index {cam_index} is out of range. Available cameras: {camera_count}"
+
             # Obtain a handle to the camera
             self._camera = self.get_camera(cam_index)
 
             # Obtain its serial number
-            self.serial_number = self.get_serial_number(self._camera)
+            self._serial_number = self.get_serial_number(self._camera)
 
             # Set streaming mode
-            self.set_streaming_mode(self.serial_number,
-                                    mtFrameType.Alternating,
+            self.set_streaming_mode(mtFrameType.ROIs,
                                     mtDecimation.Dec41,
                                     mtBitDepth.Bpp14)
 
@@ -158,7 +186,6 @@ class MTC(object):
         return None
 
     def set_streaming_mode(self,
-                           serial_number: int,
                            frame_type: mtFrameType,
                            decimation: mtDecimation,
                            bit_depth: mtBitDepth) -> None:
@@ -183,9 +210,30 @@ class MTC(object):
 
         # Call the function to set streaming mode
         result = self.mtc_lib.Cameras_StreamingModeSet(
-            byref(streaming_mode), serial_number)
+            byref(streaming_mode), self._serial_number)
         if result != 0:
             self._process_error("Cameras_StreamingModeSet")
+
+    def set_reference_marker(self, ref_name: str) -> None:
+        """
+        Sets the reference marker by its name.
+
+        Parameters:
+            ref_name (str): The name of the reference marker to set.
+        """
+        # Dictionary for all markers
+        markers = {}
+
+        # Loop over each marker to retrieve its handle and name
+        for i in range(self._get_markers()):
+            handle = self._get_marker(i)
+            name = self._get_marker_name(handle)
+            markers[name] = handle
+
+        if ref_name not in markers:
+            raise ValueError(f"Reference frame '{ref_name}' not existed.")
+        else:
+            self._ref_marker = markers[ref_name]
 
     def get_poses(self, rot: bool = True) -> dict:
         """
@@ -211,19 +259,17 @@ class MTC(object):
             marker = self._get_marker(i)
 
             # Get the name of the marker
-            marker_name = self._get_marker_name(marker)
+            name = self._get_marker_name(marker)
 
-            # Retrieve the position of the marker
-            positions = self._get_position()
-            marker_data = {'pos': positions}
+            # Optional: Set the reference for the marker
+            if hasattr(self, '_ref_marker'):
+                self._set_reference_marker(marker)
 
-            # Optionally retrieve the rotation matrix of the marker
-            if rot:
-                rotations = self._get_rotation()
-                marker_data['rot'] = rotations
+            # Get the pose of the marker
+            pose = self._get_poes(marker, rot)
 
-            # Store the retrieved data in the markers dict
-            markers[marker_name] = marker_data
+            # Store the retrieved data
+            markers[name] = pose
 
         return markers
 
@@ -396,7 +442,7 @@ class MTC(object):
             else:
                 self._process_error("Marker_NameGet")
         return None
-    
+
     def _get_marker(self,
                     index: int) -> int:
         """"
@@ -422,6 +468,51 @@ class MTC(object):
             marker, self._camera, self._poseXf, byref(camera_identifier))
 
         return marker
+
+    def _get_poes(self, marker: int, rot: bool = True) -> dict:
+        """
+        Retrieves the pose (position and optional rotation matrix) of a given marker.
+
+        Parameters:
+            marker (int): The handle of the marker.
+            rot (bool, optional): Whether to include the rotation matrix in the output. Defaults to True.
+
+        Returns:
+            dict: A dictionary containing:
+            - 'pos': A NumPy array of the marker's position (x, y, z).
+            - 'rot': A NumPy array of the marker's 3x3 rotation matrix, if `rot` is True.
+        """
+        if hasattr(self, '_ref_marker'):
+            # Define the argument and return types for the functions used
+            self.mtc_lib.Marker_Marker2ReferenceXfGet.argtypes = [
+                c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+            self.mtc_lib.Marker_Marker2ReferenceXfGet.restype = c_int
+
+            # Update the poseXf with the marker's pose
+            camera_identifier = c_longlong()
+            self.mtc_lib.Marker_Marker2ReferenceXfGet(
+                marker, self._camera, self._poseXf, byref(camera_identifier))
+        else:
+            # Define the argument and return types for the functions used
+            self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
+                c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+            self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
+
+            # Update the poseXf with the marker's pose
+            camera_identifier = c_longlong()
+            self.mtc_lib.Marker_Marker2CameraXfGet(
+                marker, self._camera, self._poseXf, byref(camera_identifier))
+
+        # Retrieve the position of the marker
+        positions = self._get_position()
+        marker_pose = {'pos': positions}
+
+        # Optionally retrieve the rotation matrix of the marker
+        if rot:
+            rotations = self._get_rotation()
+            marker_pose['rot'] = rotations
+
+        return marker_pose
 
     def _get_position(self) -> np.ndarray:
         """
@@ -462,3 +553,22 @@ class MTC(object):
 
         # Transpose the rotation matrix to match the generally expected orientation
         return np.copy(np_rot_matrix.T)
+
+    def _set_reference_marker(self, marker: int) -> None:
+        """
+        Sets the reference marker for the specified marker.
+
+        Parameters:
+            marker (int): The handle of the marker for which to set the reference marker.
+        """
+        # Set function argument and return types
+        self.mtc_lib.Marker_ReferenceMarkerHandleSet.argtypes = [
+            c_longlong, c_longlong]
+        self.mtc_lib.Marker_ReferenceMarkerHandleSet.restype = c_int
+
+        # Set the reference frame for the specified marker
+        result = self.mtc_lib.Marker_ReferenceMarkerHandleSet(
+            marker, self._ref_marker)
+
+        if result != 0:
+            self._process_error("Marker_ReferenceMarkerHandleSet")
