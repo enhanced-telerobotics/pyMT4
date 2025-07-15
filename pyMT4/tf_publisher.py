@@ -1,5 +1,4 @@
 import rclpy
-import argparse
 from rclpy.node import Node
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -11,13 +10,20 @@ from pyMT4.mtc import mtFrameType, mtDecimation, mtBitDepth
 
 
 class MT4Publisher(Node):
-    def __init__(self,
-                 ref_frame: str = None,
-                 publish_rate: float = 30.0):
+    def __init__(self):
         super().__init__('mt4_publisher')
+        
+        # Declare parameters
+        self.declare_parameter('ref_frame', '')
+        self.declare_parameter('publish_rate', 30.0)
+        
+        # Get parameter values
+        ref_frame_param = self.get_parameter('ref_frame').get_parameter_value().string_value
+        self.ref_frame = ref_frame_param if ref_frame_param else None
+        publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
+        
         self.camera = MTC()
         self.parent_frame = 'MT4'
-        self.ref_frame = ref_frame
 
         # Set the camera mode
         self.camera.set_streaming_mode(
@@ -27,7 +33,7 @@ class MT4Publisher(Node):
 
         # Set the reference frame if provided
         if self.ref_frame is not None:
-            self.camera.set_reference_marker(ref_frame)
+            self.camera.set_reference_marker(self.ref_frame)
 
         # Initialize the transform broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -107,20 +113,10 @@ class MT4Publisher(Node):
         return transform
 
 
-if __name__ == '__main__':
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='MT4 Publisher Node')
-    parser.add_argument('-r', '--ref-frame', type=str, default=None,
-                        help='Reference frame for the transforms')
-    parser.add_argument('-p', '--publish-rate', type=float, default=30.0,
-                        help='Rate at which to publish transforms (Hz)')
-    args = parser.parse_args()
-
+def main():
     try:
         rclpy.init()
-        mt4_publisher = MT4Publisher(
-            ref_frame=args.ref_frame,
-            publish_rate=args.publish_rate)
+        mt4_publisher = MT4Publisher()
         rclpy.spin(mt4_publisher)
     except KeyboardInterrupt:
         mt4_publisher.get_logger().info('Shutting down MT4 Publisher...')
@@ -128,3 +124,7 @@ if __name__ == '__main__':
         mt4_publisher.destroy_node()
         mt4_publisher.camera.close()
         rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
