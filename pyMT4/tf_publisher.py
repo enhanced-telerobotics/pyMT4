@@ -7,19 +7,32 @@ from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 
 from pyMT4.mtc import MTC
+from pyMT4.mtc import mtFrameType, mtDecimation, mtBitDepth
 
 
 class MT4Publisher(Node):
-    def __init__(self, publish_rate=30.0):
+    def __init__(self,
+                 ref_frame: str = None,
+                 publish_rate: float = 30.0):
         super().__init__('mt4_publisher')
-
         self.camera = MTC()
         self.parent_frame = 'MT4'
+        self.ref_frame = ref_frame
+
+        # Set the camera mode
+        self.camera.set_streaming_mode(
+            frame_type=mtFrameType.ROIs,
+            decimation=mtDecimation.Dec41,
+            bit_depth=mtBitDepth.Bpp12)
+
+        # Set the reference frame if provided
+        if self.ref_frame is not None:
+            self.camera.set_reference_marker(ref_frame)
 
         # Initialize the transform broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # Create a timer to publish transforms at a regular rate (e.g., 30 Hz)
+        # Create a timer to publish transforms
         self.timer = self.create_timer(
             1.0/publish_rate, self.publish_transforms)
 
@@ -41,9 +54,23 @@ class MT4Publisher(Node):
                 rotation = pose['rot']
                 rotation_quaternion = R.from_matrix(rotation).as_quat()
 
-                # Broadcast the transform
-                transform = self.pos_rot_to_stamped(
-                    child_frame, position, rotation_quaternion)
+                # Format the message
+                # If the ref_frame is specified, use it as the parent frame
+                # otherwise use the camera as the parent frame
+                if self.ref_frame is None:
+                    transform = self.pos_rot_to_stamped(
+                        self.parent_frame,
+                        child_frame,
+                        position,
+                        rotation_quaternion)
+                elif child_frame == self.ref_frame:
+                    continue  # Skip the reference frame itself
+                else:
+                    transform = self.pos_rot_to_stamped(
+                        self.ref_frame,
+                        child_frame,
+                        position,
+                        rotation_quaternion)
 
                 # Send the transform
                 self.tf_broadcaster.sendTransform(transform)
@@ -52,6 +79,7 @@ class MT4Publisher(Node):
             self.get_logger().error(f'Error publishing transforms: {str(e)}')
 
     def pos_rot_to_stamped(self,
+                           parent_frame: str,
                            child_frame: str,
                            position: np.ndarray,
                            rotation: np.ndarray) -> TransformStamped:
@@ -62,7 +90,7 @@ class MT4Publisher(Node):
         # Create transform message
         transform = TransformStamped()
         transform.header.stamp = current_time
-        transform.header.frame_id = self.parent_frame
+        transform.header.frame_id = parent_frame
         transform.child_frame_id = child_frame
 
         # Set translation
@@ -82,16 +110,21 @@ class MT4Publisher(Node):
 if __name__ == '__main__':
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='MT4 Publisher Node')
+    parser.add_argument('-r', '--ref-frame', type=str, default=None,
+                        help='Reference frame for the transforms')
     parser.add_argument('-p', '--publish-rate', type=float, default=30.0,
                         help='Rate at which to publish transforms (Hz)')
     args = parser.parse_args()
 
     try:
         rclpy.init()
-        mt4_publisher = MT4Publisher(args.publish_rate)
+        mt4_publisher = MT4Publisher(
+            ref_frame=args.ref_frame,
+            publish_rate=args.publish_rate)
         rclpy.spin(mt4_publisher)
     except KeyboardInterrupt:
         mt4_publisher.get_logger().info('Shutting down MT4 Publisher...')
     finally:
         mt4_publisher.destroy_node()
+        mt4_publisher.camera.close()
         rclpy.shutdown()
