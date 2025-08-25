@@ -25,7 +25,11 @@ cd /path/to/pyMT4
 pip install -e .
 ```
 
+
 ### Usage
+
+
+#### As a Python Library
 
 To use the `pyMT4` package, simply import the `MTC` class from the package:
 
@@ -34,12 +38,30 @@ from pyMT4 import MTC
 
 # Example usage
 mtc = MTC()
-mtc.get_poses()
+poses = mtc.get_poses()
+
+# To set a reference marker by name (for relative pose calculation):
+mtc.set_reference_marker('BreadBoard')  # Replace 'BreadBoard' with your marker name
+poses = mtc.get_poses()
 ```
 
-Tips: 
-- Marker template registration has to be done separately by the C# demo. 
-- Check camera connection and image frame before using this package. 
+#### As a ROS 2 Node
+
+You can run the `tf_publisher` node using ROS 2:
+
+```bash
+ros2 run pyMT4 tf_publisher
+```
+
+Or with additional ROS 2 arguments, for example to set the reference frame:
+
+```bash
+ros2 run pyMT4 tf_publisher --ros-args -p ref_frame:=BreadBoard
+```
+
+**Tips:**
+- Marker template registration has to be done separately by the C# demo.
+- Check camera connection and image frame before using this package.
 
 ### Features
 
