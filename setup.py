@@ -16,7 +16,10 @@ setup(
     packages=find_packages(),
     install_requires=[
         'numpy',
+        'scipy'
     ],
+    extras_require={'server': ['Flask>=2.2', 'waitress>=3.0.2']},
+    entry_points={'console_scripts': ['pymt4-server=pyMT4.server:main']},
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Science/Research',
