@@ -119,3 +119,103 @@ python -m unittest discover -s tests
 
 [MIT License](LICENSE). Report issues on
 [GitHub](https://github.com/enhanced-telerobotics/pyMT4/issues).
+
+## Compressed stereo images in ROS 2
+
+Run the publisher:
+
+```bash
+ros2 run pyMT4 tf_publisher
+```
+
+OpenCV encodes each stereo frame as JPEG and publishes
+`sensor_msgs/CompressedImage` using sensor-data QoS on:
+
+- `/mt4_publisher/camera/left/image_raw/compressed`
+- `/mt4_publisher/camera/right/image_raw/compressed`
+
+Images share the acquisition timestamp with pose transforms, and publish even
+without markers. The camera controls cadence; no rate timer is added.
+Image sizes follow camera decimation. The connected MT4 supplies monochrome
+pixels replicated across RGB channels. Optical frame IDs are
+`MT4_left_optical_frame` and `MT4_right_optical_frame`; calibrated optical
+transforms and CameraInfo are not provided.
+
+JPEG quality defaults to 90 (range 1–100):
+
+```bash
+ros2 run pyMT4 tf_publisher --ros-args -p jpeg_quality:=80
+# Disable images:
+ros2 run pyMT4 tf_publisher --ros-args -p publish_images:=false
+```
+
+ROS requires `python3-opencv`. For a separate pip environment, install
+`opencv-python` alongside the ROS Python dependencies.
+The SDK API `camera.get_rgb_images()` returns owned stereo RGB NumPy arrays
+after `get_poses()` acquires a frame. It does not grab a second frame.
+
+## Camera streaming mode
+
+The ROS node defaults to `Full`, `Dec11` (1:1), and `Bpp12`.
+Set the SDK mode at startup using named ROS parameters:
+
+```bash
+ros2 run pyMT4 tf_publisher --ros-args \
+  -p frame_type:=Full -p decimation:=Dec11 -p bit_depth:=Bpp12
+# Example: alternating frames at 4:1 decimation
+ros2 run pyMT4 tf_publisher --ros-args \
+  -p frame_type:=Alternating -p decimation:=Dec41 -p bit_depth:=Bpp12
+```
+
+Supported values: `frame_type` = `Full`, `ROIs`, `Alternating`;
+`decimation` = `Dec11`, `Dec21`, `Dec41`;
+`bit_depth` = `Bpp12`, `Bpp14`. Names are case-sensitive.
+ROI-only mode may not provide images; use `publish_images:=false` when
+selecting it. These are startup settings, not dynamic mode changes.
+
+## Dynamic exposure
+
+Automatic exposure remains the default. For manual control:
+
+```bash
+ros2 run pyMT4 tf_publisher --ros-args -p auto_exposure:=false -p exposure:=5.0
+```
+
+`exposure` is the SDK gain × shutter-milliseconds value, not shutter time
+alone. Its allowed range is queried from the camera and shown in the ROS
+parameter descriptor. Use floating-point values such as `5.0`.
+
+While the node is running, open `rqt`, select **Plugins → Configuration →
+Dynamic Reconfigure**, and select `/mt4_publisher`. Turn `auto_exposure` off
+and adjust `exposure`. ROS 2 `rqt_reconfigure` edits the node parameters;
+no restart is required. Changes to `exposure` while auto is enabled select
+the value to use when switching to manual.
+
+Equivalent terminal controls:
+
+```bash
+ros2 param set /mt4_publisher auto_exposure false
+ros2 param set /mt4_publisher exposure 5.0
+ros2 param set /mt4_publisher auto_exposure true
+```
+
+Manual mode disables camera, marker, and XPoint automatic exposure controls.
+Automatic mode enables them again. SDK errors reject parameter updates.
+
+## Camera launch preset
+
+```bash
+ros2 launch pyMT4 mt4.launch.py
+```
+
+Defaults: `Alternating`, `Dec41`, `Bpp12`, images enabled, manual exposure
+with `exposure=5.0`. This launch preset overrides the node's automatic-exposure
+default. Override any setting with launch arguments:
+
+```bash
+ros2 launch pyMT4 mt4.launch.py auto_exposure:=true
+ros2 launch pyMT4 mt4.launch.py exposure:=3.0 publish_images:=false
+```
+
+`ref_frame`, `jpeg_quality`, and `tracking_diagnostics` are also exposed.
+Exposure parameters remain adjustable through rqt while running.

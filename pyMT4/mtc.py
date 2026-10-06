@@ -1,4 +1,6 @@
 import os
+import time
+import math
 import sys
 import warnings
 import ctypes
@@ -239,6 +241,43 @@ class MTC(object):
                 self._process_error("Camera_ResolutionGet")
         return None
 
+    def get_rgb_images(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return owned RGB arrays for the latest acquired stereo frame.
+
+        Call get_poses() first to acquire the frame. No additional frame is
+        grabbed here, so images and poses correspond to the same acquisition.
+        """
+        mode = mtStreamingModeStruct()
+        get_mode = self.mtc_lib.Camera_StreamingModeGet
+        get_mode.argtypes = [c_ssize_t, POINTER(mtStreamingModeStruct)]
+        get_mode.restype = c_int
+        if get_mode(self._camera, byref(mode)) != 0:
+            self._process_error('Camera_StreamingModeGet')
+        image_functions = {
+            1: 'Camera_24BitImagesGet',
+            2: 'Camera_24BitHalfSizeImagesGet',
+            4: 'Camera_24BitQuarterSizeImagesGet',
+        }
+        if mode.decimation not in image_functions:
+            raise RuntimeError(f'Unsupported camera decimation: {mode.decimation}')
+        width, height = self.get_camera_resolution()
+        width //= mode.decimation
+        height //= mode.decimation
+        shape = (height, width, 3)
+        if not hasattr(self, '_image_buffers') or self._image_buffers[0].shape != shape:
+            self._image_buffers = tuple(np.empty(shape, dtype=np.uint8) for _ in range(2))
+        left, right = self._image_buffers
+        function_name = image_functions[mode.decimation]
+        function = getattr(self.mtc_lib, function_name)
+        function.argtypes = [c_ssize_t, POINTER(c_ubyte), POINTER(c_ubyte)]
+        function.restype = c_int
+        result = function(self._camera,
+                          left.ctypes.data_as(POINTER(c_ubyte)),
+                          right.ctypes.data_as(POINTER(c_ubyte)))
+        if result != 0:
+            self._process_error(function_name)
+        return left.copy(), right.copy()
+
     def set_streaming_mode(self,
                            frame_type: mtFrameType,
                            decimation: mtDecimation,
@@ -266,6 +305,47 @@ class MTC(object):
             streaming_mode, self._serial_number)
         if result != 0:
             self._process_error("Cameras_StreamingModeSet")
+
+    def _get_exposure_value(self, function_name: str) -> float:
+        function = getattr(self.mtc_lib, function_name)
+        function.argtypes = [c_ssize_t, POINTER(c_double)]
+        function.restype = c_int
+        value = c_double()
+        if function(self._camera, byref(value)) != 0:
+            self._process_error(function_name)
+        return value.value
+
+    def get_exposure(self) -> float:
+        """Return SDK exposure (gain multiplied by shutter duration in ms)."""
+        return self._get_exposure_value('Camera_ExposureGet')
+
+    def get_exposure_range(self) -> Tuple[float, float]:
+        return (self._get_exposure_value('Camera_ExposureMinGet'),
+                self._get_exposure_value('Camera_ExposureMaxGet'))
+
+    def set_exposure_mode(self, auto_exposure: bool, exposure: float) -> None:
+        """Apply tracking-aware automatic or fixed manual exposure."""
+        minimum, maximum = self.get_exposure_range()
+        if not math.isfinite(exposure) or not minimum <= exposure <= maximum:
+            raise ValueError(f'exposure must be between {minimum} and {maximum}')
+        # Marker/XPoint auto adjustment must not overwrite manual camera settings.
+        for name in ('Markers_AutoAdjustCameraExposureSet', 'XPoints_AutoAdjustCameraExposureSet'):
+            function = getattr(self.mtc_lib, name)
+            function.argtypes = [c_bool]
+            function.restype = c_int
+            if function(auto_exposure) != 0:
+                self._process_error(name)
+        function = self.mtc_lib.Camera_AutoExposureSet
+        function.argtypes = [c_ssize_t, c_int]
+        function.restype = c_int
+        if function(self._camera, int(auto_exposure)) != 0:
+            self._process_error('Camera_AutoExposureSet')
+        if not auto_exposure:
+            function = self.mtc_lib.Camera_ExposureSet
+            function.argtypes = [c_ssize_t, c_double]
+            function.restype = c_int
+            if function(self._camera, exposure) != 0:
+                self._process_error('Camera_ExposureSet')
 
     def set_reference_marker(self, ref_name: str) -> None:
         """
@@ -305,6 +385,7 @@ class MTC(object):
 
         # Get the number of markers identified in the current frame
         num_markers = self._get_markers()
+        pose_started = time.perf_counter()
 
         # Loop over each marker to retrieve its pose
         for i in range(num_markers):
@@ -324,6 +405,7 @@ class MTC(object):
             # Store the retrieved data
             markers[name] = pose
 
+        self.last_frame_timings['pose_ms'] = (time.perf_counter() - pose_started) * 1000
         return markers
 
     def close(self) -> None:
@@ -441,18 +523,23 @@ class MTC(object):
         self.mtc_lib.Collection_Count.argtypes = [c_ssize_t]
         self.mtc_lib.Collection_Count.restype = c_int
 
+        self.last_frame_timings = {}
+        started = time.perf_counter()
         # Grab a frame from the camera
         result = self.mtc_lib.Cameras_GrabFrame(self._camera)
         if result != 0:  # Check for success, assuming 0 indicates success
             self._process_error("Cameras_GrabFrame")
             return 0
 
+        self.last_frame_timings['grab_ms'] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
         # Process the frame to identify markers
         result = self.mtc_lib.Markers_ProcessFrame(self._camera)
         if result != 0:
             self._process_error("Markers_ProcessFrame")
             return 0
 
+        self.last_frame_timings['process_ms'] = (time.perf_counter() - started) * 1000
         # Get the identified markers from the processed frame
         result = self.mtc_lib.Markers_IdentifiedMarkersGet(
             self._camera, self._markers)
@@ -507,18 +594,9 @@ class MTC(object):
         self.mtc_lib.Collection_Int.argtypes = [c_ssize_t, c_int]
         self.mtc_lib.Collection_Int.restype = c_ssize_t
 
-        self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
-            c_ssize_t, c_ssize_t, c_ssize_t, POINTER(c_ssize_t)]
-        self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
-
-        # Get the handle of the current marker from the collection
         marker = self.mtc_lib.Collection_Int(self._markers, index + 1)
-
-        # Update the poseXf with the marker's pose
-        camera_identifier = c_ssize_t()
-        self.mtc_lib.Marker_Marker2CameraXfGet(
-            marker, self._camera, self._poseXf, byref(camera_identifier))
-
+        if not marker:
+            self._process_error('Collection_Int')
         return marker
 
     def _get_poes(self, marker: int, rot: bool = True) -> dict:
@@ -542,8 +620,10 @@ class MTC(object):
 
             # Update the poseXf with the marker's pose
             camera_identifier = c_ssize_t()
-            self.mtc_lib.Marker_Marker2ReferenceXfGet(
+            result = self.mtc_lib.Marker_Marker2ReferenceXfGet(
                 marker, self._camera, self._poseXf, byref(camera_identifier))
+            if result != 0:
+                self._process_error('Marker_Marker2ReferenceXfGet')
         else:
             # Define the argument and return types for the functions used
             self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
@@ -552,8 +632,10 @@ class MTC(object):
 
             # Update the poseXf with the marker's pose
             camera_identifier = c_ssize_t()
-            self.mtc_lib.Marker_Marker2CameraXfGet(
+            result = self.mtc_lib.Marker_Marker2CameraXfGet(
                 marker, self._camera, self._poseXf, byref(camera_identifier))
+            if result != 0:
+                self._process_error('Marker_Marker2CameraXfGet')
 
         # Retrieve the position of the marker
         positions = self._get_position()
@@ -580,7 +662,9 @@ class MTC(object):
 
         # Retrieve the position of the marker
         positions = (c_double * 3)()
-        self.mtc_lib.Xform3D_ShiftGet(self._poseXf, byref(positions))
+        result = self.mtc_lib.Xform3D_ShiftGet(self._poseXf, byref(positions))
+        if result != 0:
+            self._process_error('Xform3D_ShiftGet')
         np_positions = np.frombuffer(positions, dtype=np.float64)
 
         return np.copy(np_positions)
@@ -599,7 +683,9 @@ class MTC(object):
 
         # Retrieve the rotation matrix of the marker
         rot_matrix = (c_double * 9)()
-        self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
+        result = self.mtc_lib.Xform3D_RotMatGet(self._poseXf, byref(rot_matrix))
+        if result != 0:
+            self._process_error('Xform3D_RotMatGet')
         np_rot_matrix = np.frombuffer(
             rot_matrix, dtype=np.float64).reshape((3, 3))
 
