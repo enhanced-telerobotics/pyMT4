@@ -14,6 +14,7 @@ setup(
     url='https://github.com/enhanced-telerobotics/pyMT4',
     license='MIT',
     packages=find_packages(),
+    package_data={'pyMT4': ['libZXing.so']},
     install_requires=[
         'numpy',
     ],
@@ -23,6 +24,7 @@ setup(
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',
         'Operating System :: Microsoft :: Windows',
+        'Operating System :: POSIX :: Linux',
     ],
     python_requires='>=3.8',
 )
