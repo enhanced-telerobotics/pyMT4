@@ -6,43 +6,45 @@ from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 
 from pyMT4.mtc import MTC
-from pyMT4.mtc import mtFrameType, mtDecimation, mtBitDepth
 
 
 class MT4Publisher(Node):
     def __init__(self):
         super().__init__('mt4_publisher')
-        
-        # Declare parameters
-        self.declare_parameter('ref_frame', '')
-        self.declare_parameter('publish_rate', 30.0)
-        
-        # Get parameter values
-        ref_frame_param = self.get_parameter('ref_frame').get_parameter_value().string_value
-        self.ref_frame = ref_frame_param if ref_frame_param else None
-        publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
-        
-        self.camera = MTC()
-        self.parent_frame = 'MT4'
 
-        # Set the camera mode
-        self.camera.set_streaming_mode(
-            frame_type=mtFrameType.ROIs,
-            decimation=mtDecimation.Dec41,
-            bit_depth=mtBitDepth.Bpp12)
+        self.camera = None
+        try:
+            # Declare parameters
+            self.declare_parameter('ref_frame', '')
 
-        # Set the reference frame if provided
-        if self.ref_frame is not None:
-            self.camera.set_reference_marker(self.ref_frame)
+            # Get parameter values
+            ref_frame_param = self.get_parameter('ref_frame').get_parameter_value().string_value
+            self.ref_frame = ref_frame_param if ref_frame_param else None
 
-        # Initialize the transform broadcaster
-        self.tf_broadcaster = TransformBroadcaster(self)
+            self.camera = MTC()
+            self.parent_frame = 'MT4'
 
-        # Create a timer to publish transforms
-        self.timer = self.create_timer(
-            1.0/publish_rate, self.publish_transforms)
+            # Use the camera default mode; SDK-specific ROI modes are not forced.
 
-        self.get_logger().info('MT4 Publisher node started, publishing transforms to /tf')
+            # Set the reference frame if provided
+            if self.ref_frame is not None:
+                self.camera.set_reference_marker(self.ref_frame)
+
+            # Initialize the transform broadcaster
+            self.tf_broadcaster = TransformBroadcaster(self)
+
+            self.get_logger().info('MT4 Publisher node started, publishing transforms to /tf')
+        except Exception:
+            self.destroy_node()
+            raise
+
+    def destroy_node(self):
+        try:
+            if self.camera is not None:
+                self.camera.close()
+                self.camera = None
+        finally:
+            super().destroy_node()
 
     def publish_transforms(self):
         """Publish transforms for all detected markers"""
@@ -114,16 +116,24 @@ class MT4Publisher(Node):
 
 
 def main():
+    mt4_publisher = None
+    rclpy.init()
     try:
-        rclpy.init()
         mt4_publisher = MT4Publisher()
-        rclpy.spin(mt4_publisher)
+        while rclpy.ok():
+            rclpy.spin_once(mt4_publisher, timeout_sec=0.0)
+            if rclpy.ok():
+                # Camera acquisition determines the cadence; publish each available pose.
+                mt4_publisher.publish_transforms()
     except KeyboardInterrupt:
-        mt4_publisher.get_logger().info('Shutting down MT4 Publisher...')
+        if mt4_publisher is not None and rclpy.ok():
+            mt4_publisher.get_logger().info('Shutting down MT4 Publisher...')
     finally:
-        mt4_publisher.destroy_node()
-        mt4_publisher.camera.close()
-        rclpy.shutdown()
+        try:
+            if mt4_publisher is not None:
+                mt4_publisher.destroy_node()
+        finally:
+            rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
