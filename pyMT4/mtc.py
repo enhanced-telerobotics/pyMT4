@@ -1,6 +1,9 @@
 import os
+import sys
 import warnings
 import ctypes
+from ctypes.util import find_library
+from importlib.metadata import distributions
 import logging
 import numpy as np
 from ctypes import *
@@ -17,7 +20,7 @@ class MTC(object):
         This class handles loading the MT4 DLL, attaching cameras, loading marker templates, and provides
         methods for camera and marker management, including retrieving camera information, setting streaming
         modes, processing frames, and extracting marker poses.
-        
+
     Class Variables:
         mtc_lib (ctypes.CDLL): The loaded MT4 shared library.
         mthome (str): Path to the MT4 home directory.
@@ -39,23 +42,73 @@ class MTC(object):
 
     def __init__(self,
                  mt_home: str = MTHome,
-                 cam_index: int = 0) -> None:
+                 cam_index: int = 0,
+                 library_path: str = None,
+                 calibration_dir: str = None,
+                 marker_dir: str = None) -> None:
         """
         Initializes the MTC class, loading the shared library and attaching available cameras.
 
         Parameters:
-            mt_home (str): The path to the MTHome directory.
+            mt_home (str): SDK data directory (CalibrationFiles and Markers).
+            cam_index (int): Index of the camera to use.
+            library_path (str): Optional explicit shared library path.
+            calibration_dir (str): Optional camera calibration directory.
+            marker_dir (str): Optional marker template directory.
         """
         self.mtc_lib = None
-        self.mthome = mt_home
+        if sys.platform not in ("win32", "linux"):
+            raise RuntimeError("MicronTracker supports Windows and Linux only.")
+        if not mt_home:
+            raise ValueError("Set MTHome or pass mt_home to the SDK data directory.")
+        self.mthome = os.fspath(mt_home)
+        self.calibration_dir = os.fspath(calibration_dir) if calibration_dir is not None else os.path.join(self.mthome, 'CalibrationFiles')
+        self.marker_dir = os.fspath(marker_dir) if marker_dir is not None else os.path.join(self.mthome, 'Markers')
 
-        # Load the shared library
-        try:
+        if library_path is not None:
+            lib_path = os.fspath(library_path)
+        elif sys.platform == "win32":
             lib_path = os.path.join(self.mthome, 'Dist64MT4', 'mtc.dll')
+        else:
+            # The Linux deb installs the library separately from MTHome data.
+            lib_path = find_library('MTC')
+            if not lib_path:
+                candidates = (
+                    '/usr/lib/libMTC.so',
+                    '/usr/local/lib/libMTC.so',
+                    os.path.join(self.mthome, 'Dist64MT4', 'libMTC.so'),
+                )
+                lib_path = next((path for path in candidates if os.path.isfile(path)), 'libMTC.so')
+        self._sdk_dependencies = []
+        installed_package_dir = os.path.dirname(__file__)
+        # Local egg-info may shadow the installed distribution in a checkout.
+        for package in distributions():
+            if package.metadata.get('Name', '').lower() == 'pymt4':
+                candidate = os.fspath(package.locate_file('pyMT4'))
+                if os.path.isfile(os.path.join(candidate, 'libZXing.so')):
+                    installed_package_dir = candidate
+                    break
+        if sys.platform == "linux":
+            # This SDK release omits these dependencies from libMTC's ELF metadata.
+            for name in ('GCBase_gcc48_v3_2', 'GenApi_gcc48_v3_2', 'JadakApi-4.10.5', 'ZXing'):
+                candidates = (
+                    os.path.join(os.path.dirname(os.path.abspath(lib_path)), f'lib{name}.so'),
+                    os.path.join(os.path.dirname(__file__), f'lib{name}.so'),
+                    os.path.join(installed_package_dir, f'lib{name}.so'),
+                    f'/usr/lib/lib{name}.so',
+                    f'/usr/local/lib/lib{name}.so',
+                )
+                dependency = next((path for path in candidates if os.path.isfile(path)), None)
+                if dependency:
+                    try:
+                        self._sdk_dependencies.append(ctypes.CDLL(dependency, mode=ctypes.RTLD_GLOBAL))
+                    except OSError as e:
+                        raise RuntimeError(f"Could not load SDK dependency {dependency}: {e}") from e
+        try:
             self.mtc_lib = ctypes.CDLL(lib_path)
         except OSError as e:
-            raise RuntimeError(
-                f"Could not load MTC library from {lib_path}: {e}")
+            raise RuntimeError(f"Could not load MTC library from {lib_path}: {e}. "
+                               "For Linux SDK 4.2.2, see the README dependency setup.") from e
 
         # Set types for MTLastErrorString
         self.mtc_lib.MTLastErrorString.restype = c_char_p
@@ -78,9 +131,10 @@ class MTC(object):
             self._serial_number = self.get_serial_number(self._camera)
 
             # Set streaming mode
-            self.set_streaming_mode(mtFrameType.ROIs,
-                                    mtDecimation.Dec41,
-                                    mtBitDepth.Bpp14)
+            # Keep the camera's default streaming mode.
+            # self.set_streaming_mode(mtFrameType.ROIs,
+            #                         mtDecimation.Dec41,
+            #                         mtBitDepth.Bpp14)
 
             # Init collection handles
             self._markers = self._create_collection()
@@ -113,11 +167,11 @@ class MTC(object):
             int: The camera handle if successful, otherwise None.
         """
         # Set function argument and return types
-        self.mtc_lib.Cameras_ItemGet.argtypes = [c_int, POINTER(c_longlong)]
+        self.mtc_lib.Cameras_ItemGet.argtypes = [c_int, POINTER(c_ssize_t)]
         self.mtc_lib.Cameras_ItemGet.restype = c_int
 
         if self.mtc_lib:
-            camera_handle = c_longlong()
+            camera_handle = c_ssize_t()
             result = self.mtc_lib.Cameras_ItemGet(index, byref(camera_handle))
             if result == 0:
                 return camera_handle.value
@@ -137,7 +191,7 @@ class MTC(object):
         """
         # Set function argument and return types
         self.mtc_lib.Camera_SerialNumberGet.argtypes = [
-            c_longlong, POINTER(c_int)]
+            c_ssize_t, POINTER(c_int)]
         self.mtc_lib.Camera_SerialNumberGet.restype = c_int
 
         # Set to the default camera
@@ -167,7 +221,7 @@ class MTC(object):
         """
         # Set function argument and return types
         self.mtc_lib.Camera_ResolutionGet.argtypes = [
-            c_longlong, POINTER(c_int), POINTER(c_int)]
+            c_ssize_t, POINTER(c_int), POINTER(c_int)]
         self.mtc_lib.Camera_ResolutionGet.restype = c_int
 
         # Set to the default camera
@@ -301,8 +355,7 @@ class MTC(object):
         self.mtc_lib.Cameras_AttachAvailableCameras.restype = c_int
 
         # Set the calibration directory path
-        calibration_dir = os.path.join(
-            self.mthome, 'CalibrationFiles').encode('utf-8')
+        calibration_dir = os.fsencode(self.calibration_dir)
 
         # Attach available cameras
         result = self.mtc_lib.Cameras_AttachAvailableCameras(calibration_dir)
@@ -320,7 +373,7 @@ class MTC(object):
         self.mtc_lib.Markers_LoadTemplates.restype = c_int
 
         # Set the marker templates directory path
-        marker_dir = os.path.join(self.mthome, 'Markers').encode('utf-8')
+        marker_dir = os.fsencode(self.marker_dir)
 
         # Load the marker templates
         result = self.mtc_lib.Markers_LoadTemplates(marker_dir)
@@ -336,8 +389,8 @@ class MTC(object):
         Returns:
             int: The handle of the new collection as an integer, or None if creation failed.
         """
-        # Set the return type of Collection_New to c_longlong
-        self.mtc_lib.Collection_New.restype = c_longlong
+        # Set the return type of Collection_New to c_ssize_t
+        self.mtc_lib.Collection_New.restype = c_ssize_t
 
         if self.mtc_lib:
             # Call the function and get the handle
@@ -355,8 +408,8 @@ class MTC(object):
         Returns:
             int: The handle of the new 3D transformation object as an integer, or None if creation failed.
         """
-        # Set the return type of Xform3D_New to c_longlong
-        self.mtc_lib.Xform3D_New.restype = c_longlong
+        # Set the return type of Xform3D_New to c_ssize_t
+        self.mtc_lib.Xform3D_New.restype = c_ssize_t
 
         if self.mtc_lib:
             # Call the function and get the handle
@@ -376,17 +429,17 @@ class MTC(object):
             int: The number of markers identified in the current frame.
         """
         # Define the argument types for the required functions
-        self.mtc_lib.Cameras_GrabFrame.argtypes = [c_longlong]
+        self.mtc_lib.Cameras_GrabFrame.argtypes = [c_ssize_t]
         self.mtc_lib.Cameras_GrabFrame.restype = c_int
 
-        self.mtc_lib.Markers_ProcessFrame.argtypes = [c_longlong]
+        self.mtc_lib.Markers_ProcessFrame.argtypes = [c_ssize_t]
         self.mtc_lib.Markers_ProcessFrame.restype = c_int
 
         self.mtc_lib.Markers_IdentifiedMarkersGet.argtypes = [
-            c_longlong, c_longlong]
+            c_ssize_t, c_ssize_t]
         self.mtc_lib.Markers_IdentifiedMarkersGet.restype = c_int
 
-        self.mtc_lib.Collection_Count.argtypes = [c_longlong]
+        self.mtc_lib.Collection_Count.argtypes = [c_ssize_t]
         self.mtc_lib.Collection_Count.restype = c_int
 
         # Grab a frame from the camera
@@ -425,7 +478,7 @@ class MTC(object):
         """
         # Set function argument and return types
         self.mtc_lib.Marker_NameGet.argtypes = [
-            c_longlong, c_char_p, c_int, POINTER(c_int)]
+            c_ssize_t, c_char_p, c_int, POINTER(c_int)]
         self.mtc_lib.Marker_NameGet.restype = c_int
 
         if self.mtc_lib:
@@ -452,18 +505,18 @@ class MTC(object):
             index (int): The index of the marker.
         """
         # Define the argument and return types for the functions used
-        self.mtc_lib.Collection_Int.argtypes = [c_longlong, c_int]
-        self.mtc_lib.Collection_Int.restype = c_longlong
+        self.mtc_lib.Collection_Int.argtypes = [c_ssize_t, c_int]
+        self.mtc_lib.Collection_Int.restype = c_ssize_t
 
         self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
-            c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+            c_ssize_t, c_ssize_t, c_ssize_t, POINTER(c_ssize_t)]
         self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
 
         # Get the handle of the current marker from the collection
         marker = self.mtc_lib.Collection_Int(self._markers, index + 1)
 
         # Update the poseXf with the marker's pose
-        camera_identifier = c_longlong()
+        camera_identifier = c_ssize_t()
         self.mtc_lib.Marker_Marker2CameraXfGet(
             marker, self._camera, self._poseXf, byref(camera_identifier))
 
@@ -485,21 +538,21 @@ class MTC(object):
         if hasattr(self, '_ref_marker'):
             # Define the argument and return types for the functions used
             self.mtc_lib.Marker_Marker2ReferenceXfGet.argtypes = [
-                c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+                c_ssize_t, c_ssize_t, c_ssize_t, POINTER(c_ssize_t)]
             self.mtc_lib.Marker_Marker2ReferenceXfGet.restype = c_int
 
             # Update the poseXf with the marker's pose
-            camera_identifier = c_longlong()
+            camera_identifier = c_ssize_t()
             self.mtc_lib.Marker_Marker2ReferenceXfGet(
                 marker, self._camera, self._poseXf, byref(camera_identifier))
         else:
             # Define the argument and return types for the functions used
             self.mtc_lib.Marker_Marker2CameraXfGet.argtypes = [
-                c_longlong, c_longlong, c_longlong, POINTER(c_longlong)]
+                c_ssize_t, c_ssize_t, c_ssize_t, POINTER(c_ssize_t)]
             self.mtc_lib.Marker_Marker2CameraXfGet.restype = c_int
 
             # Update the poseXf with the marker's pose
-            camera_identifier = c_longlong()
+            camera_identifier = c_ssize_t()
             self.mtc_lib.Marker_Marker2CameraXfGet(
                 marker, self._camera, self._poseXf, byref(camera_identifier))
 
@@ -523,7 +576,7 @@ class MTC(object):
         """
         # Define the argument and return types for the functions used
         self.mtc_lib.Xform3D_ShiftGet.argtypes = [
-            c_longlong, POINTER(c_double * 3)]
+            c_ssize_t, POINTER(c_double * 3)]
         self.mtc_lib.Xform3D_ShiftGet.restype = c_int
 
         # Retrieve the position of the marker
@@ -542,7 +595,7 @@ class MTC(object):
         """
         # Define the argument and return types for the functions used
         self.mtc_lib.Xform3D_RotMatGet.argtypes = [
-            c_longlong, POINTER(c_double * 9)]
+            c_ssize_t, POINTER(c_double * 9)]
         self.mtc_lib.Xform3D_RotMatGet.restype = c_int
 
         # Retrieve the rotation matrix of the marker
@@ -563,7 +616,7 @@ class MTC(object):
         """
         # Set function argument and return types
         self.mtc_lib.Marker_ReferenceMarkerHandleSet.argtypes = [
-            c_longlong, c_longlong]
+            c_ssize_t, c_ssize_t]
         self.mtc_lib.Marker_ReferenceMarkerHandleSet.restype = c_int
 
         # Set the reference frame for the specified marker
