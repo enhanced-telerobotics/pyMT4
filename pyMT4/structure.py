@@ -31,7 +31,7 @@ class mtDecimation(IntEnum):
     NoneType = 0        # Error-state, no decimation mode set
     Dec11 = 1           # Images received with no decimation (1:1)
     Dec21 = 2           # Images received with 2:1 decimation, every 2nd row and column is kept
-    Dec41 = 3           # Images received with 4:1 decimation, every 4th row and column is kept
+    Dec41 = 4           # Images received with 4:1 decimation, every 4th row and column is kept
 
 
 class mtBitDepth(IntEnum):
